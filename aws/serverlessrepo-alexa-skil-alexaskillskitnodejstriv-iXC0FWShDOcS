@@ -1,0 +1,342 @@
+//ALEXA
+const Alexa = require('ask-sdk-core');
+const AWS = require('aws-sdk');
+
+const IotData = new AWS.IotData({ endpoint: 'abmisr4l2y1c3-ats.iot.us-east-2.amazonaws.com' });
+const dynamo = new AWS.DynamoDB.DocumentClient();
+
+async function getAuthorizedThingName(userId) {
+    console.log('Buscando thingName para userId:', userId); // <-- nuevo log
+    const params = {
+        TableName: 'Users_Bomberitos',
+        Key: { userId }
+    };
+
+    try {
+        const data = await dynamo.get(params).promise();
+        console.log('Resultado de DynamoDB:', data); 
+
+        return data.Item ? data.Item.thingName : null;
+    } catch (err) {
+        console.error("DynamoDB error:", err);
+        return null;
+    }
+}
+
+
+function getShadowPromise(params) {
+    return new Promise((resolve, reject) => {
+        IotData.getThingShadow(params, (err, data) => {
+            if (err) {
+                console.log(err, err.stack);
+                reject(`Failed to get thing shadow: ${err.message}`);
+            } else {
+                resolve(JSON.parse(data.payload));
+            }
+        });
+    });
+}
+
+const LaunchRequestHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'LaunchRequest';
+    },
+    handle(handlerInput) {
+        const speakOutput = 'Bomberito al rescate, ¿Qué deseas hacer?';
+        return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .reprompt('¿Quieres hacer otra acción como encender, apagar o consultar el estado?')
+            .getResponse();
+    }
+};
+
+const TurnOnIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'TurnOnIntent';
+    },
+    async handle(handlerInput) {
+        const userId = handlerInput.requestEnvelope.context.System.user.userId;
+        const thingName = await getAuthorizedThingName(userId);
+
+        if (!thingName) {
+            return handlerInput.responseBuilder
+                .speak("No estás autorizado para realizar esta acción.")
+                .getResponse();
+        }
+
+        const params = {
+            thingName,
+            payload: JSON.stringify({ state: { desired: { bomba: 1 } } })
+        };
+
+        IotData.updateThingShadow(params, (err) => {
+            if (err) console.log(err);
+        });
+
+        return handlerInput.responseBuilder
+            .speak('Solicitaste encender!')
+            .reprompt('¿Quieres hacer otra acción?')
+            .getResponse();
+    }
+};
+
+const TurnOffIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'TurnOffIntent';
+    },
+    async handle(handlerInput) {
+        const userId = handlerInput.requestEnvelope.context.System.user.userId;
+        const thingName = await getAuthorizedThingName(userId);
+
+        if (!thingName) {
+            return handlerInput.responseBuilder
+                .speak("No estás autorizado para realizar esta acción.")
+                .getResponse();
+        }
+
+        const params = {
+            thingName,
+            payload: JSON.stringify({ state: { desired: { bomba: 0 } } })
+        };
+
+        IotData.updateThingShadow(params, (err) => {
+            if (err) console.log(err);
+        });
+
+        return handlerInput.responseBuilder
+            .speak('Solicitaste apagar!')
+            .reprompt('¿Quieres hacer otra acción?')
+            .getResponse();
+    }
+};
+
+const StateIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'StateIntent';
+    },
+    async handle(handlerInput) {
+        const userId = handlerInput.requestEnvelope.context.System.user.userId;
+        const thingName = await getAuthorizedThingName(userId);
+
+        if (!thingName) {
+            return handlerInput.responseBuilder
+                .speak("No estás autorizado para consultar el estado.")
+                .getResponse();
+        }
+
+        const params = { thingName };
+        let bomba = 'unknown';
+
+        await getShadowPromise(params).then(result => bomba = result.state.reported.bomba);
+
+        let speakOutput = 'No se pudo consultar el estado de la bomba.';
+        if (bomba === 1) speakOutput = 'La bomba está encendida.';
+        else if (bomba === 0) speakOutput = 'La bomba está apagada.';
+
+        return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .reprompt('¿Quieres hacer otra acción?')
+            .getResponse();
+    }
+};
+
+const GasLevelIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'GasLevelIntent';
+    },
+    async handle(handlerInput) {
+        const userId = handlerInput.requestEnvelope.context.System.user.userId;
+        const thingName = await getAuthorizedThingName(userId);
+
+        if (!thingName) {
+            return handlerInput.responseBuilder
+                .speak("No estás autorizado para consultar el nivel de gas.")
+                .getResponse();
+        }
+
+        const params = { thingName };
+        let gas_ppm = 'unknown';
+
+        await getShadowPromise(params).then(result => gas_ppm = result.state.reported.gas_ppm);
+
+        let speakOutput = 'No se pudo obtener la lectura del sensor de gas.';
+        if (gas_ppm !== 'unknown') {
+            speakOutput = `El nivel actual de gas es de ${gas_ppm} ppm.`;
+        }
+
+        return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .reprompt('¿Quieres hacer otra acción?')
+            .getResponse();
+    }
+};
+
+const HelpIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.HelpIntent';
+    },
+    handle(handlerInput) {
+        return handlerInput.responseBuilder
+            .speak('Tienes las opciones de encender, apagar y consultar el estado.')
+            .reprompt('¿Qué deseas hacer?')
+            .getResponse();
+    }
+};
+
+const CancelAndStopIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && (Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.CancelIntent'
+                || Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.StopIntent');
+    },
+    handle(handlerInput) {
+        return handlerInput.responseBuilder
+            .speak('Hasta pronto!')
+            .getResponse();
+    }
+};
+
+const FallbackIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'AMAZON.FallbackIntent';
+    },
+    handle(handlerInput) {
+        return handlerInput.responseBuilder
+            .speak('Lo siento, no entendí, intenta de nuevo.')
+            .reprompt('¿Qué deseas hacer?')
+            .getResponse();
+    }
+};
+
+const SessionEndedRequestHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'SessionEndedRequest';
+    },
+    handle(handlerInput) {
+        console.log(`~~~~ Session ended: ${JSON.stringify(handlerInput.requestEnvelope)}`);
+        return handlerInput.responseBuilder.getResponse();
+    }
+};
+
+const ErrorHandler = {
+    canHandle() {
+        return true;
+    },
+    handle(handlerInput, error) {
+        console.log(`~~~~ Error handled: ${error.message}`);
+        return handlerInput.responseBuilder
+            .speak('Disculpa, hubo un error. Intenta de nuevo.')
+            .reprompt('¿Qué deseas hacer?')
+            .getResponse();
+    }
+};
+
+const AlertLevelIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'AlertLevelIntent';
+    },
+    async handle(handlerInput) {
+        const userId = handlerInput.requestEnvelope.context.System.user.userId;
+        const thingName = await getAuthorizedThingName(userId);
+
+        if (!thingName) {
+            return handlerInput.responseBuilder
+                .speak("No estás autorizado para consultar el nivel de alerta.")
+                .getResponse();
+        }
+
+        const params = { thingName };
+        let nivel = 'desconocido';
+
+        await getShadowPromise(params).then(result => nivel = result.state.reported.nivel_alerta);
+
+        const speakOutput = `El nivel de alerta actual es ${nivel}.`;
+        return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .reprompt('¿Quieres consultar otra cosa?')
+            .getResponse();
+    }
+};
+
+const FireStatusIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'FireStatusIntent';
+    },
+    async handle(handlerInput) {
+        const userId = handlerInput.requestEnvelope.context.System.user.userId;
+        const thingName = await getAuthorizedThingName(userId);
+
+        if (!thingName) {
+            return handlerInput.responseBuilder
+                .speak("No estás autorizado para consultar el estado de incendio.")
+                .getResponse();
+        }
+
+        const params = { thingName };
+        let incendio = false;
+
+        await getShadowPromise(params).then(result => incendio = result.state.reported.evento_incendio);
+
+        const speakOutput = incendio
+            ? '¡Se ha detectado un posible incendio!'
+            : 'Todo está bajo control. No hay signos de incendio.';
+        return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .reprompt('¿Quieres consultar otra cosa?')
+            .getResponse();
+    }
+};
+
+const LastReportIntentHandler = {
+    canHandle(handlerInput) {
+        return Alexa.getRequestType(handlerInput.requestEnvelope) === 'IntentRequest'
+            && Alexa.getIntentName(handlerInput.requestEnvelope) === 'LastReportIntent';
+    },
+    async handle(handlerInput) {
+        const userId = handlerInput.requestEnvelope.context.System.user.userId;
+        const thingName = await getAuthorizedThingName(userId);
+
+        if (!thingName) {
+            return handlerInput.responseBuilder
+                .speak("No estás autorizado para consultar el último reporte.")
+                .getResponse();
+        }
+
+        const params = { thingName };
+        let timestamp = 'no disponible';
+
+        await getShadowPromise(params).then(result => timestamp = result.state.reported.timestamp);
+
+        const speakOutput = `La última actualización del sistema fue el ${timestamp}.`;
+        return handlerInput.responseBuilder
+            .speak(speakOutput)
+            .reprompt('¿Quieres consultar otra cosa?')
+            .getResponse();
+    }
+};
+
+exports.handler = Alexa.SkillBuilders.custom()
+    .addRequestHandlers(
+        LaunchRequestHandler,
+        TurnOnIntentHandler,
+        TurnOffIntentHandler,
+        StateIntentHandler,
+        GasLevelIntentHandler,
+        AlertLevelIntentHandler,
+        FireStatusIntentHandler,
+        LastReportIntentHandler,
+        HelpIntentHandler,
+        CancelAndStopIntentHandler,
+        FallbackIntentHandler,
+        SessionEndedRequestHandler
+    )
+    .addErrorHandlers(ErrorHandler)
+    .lambda();
